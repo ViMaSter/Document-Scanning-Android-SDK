@@ -52,16 +52,39 @@ internal class PolygonPointImageView @JvmOverloads constructor(
                         y = startPoint.y + mv.y
                         startPoint = PointF(x, y)
                     }
+                    polygonView.dispatchCornerTouchEvent(
+                        MotionEvent.ACTION_MOVE,
+                        event.rawX,
+                        event.rawY
+                    )
                 }
 
                 MotionEvent.ACTION_DOWN -> {
                     downPoint.x = event.x
                     downPoint.y = event.y
                     startPoint = PointF(x, y)
+                    polygonView.dispatchCornerTouchEvent(
+                        MotionEvent.ACTION_DOWN,
+                        event.rawX,
+                        event.rawY
+                    )
                 }
 
                 MotionEvent.ACTION_UP -> {
                     performClick()
+                    polygonView.dispatchCornerTouchEvent(
+                        MotionEvent.ACTION_UP,
+                        event.rawX,
+                        event.rawY
+                    )
+                }
+
+                MotionEvent.ACTION_CANCEL -> {
+                    polygonView.dispatchCornerTouchEvent(
+                        MotionEvent.ACTION_CANCEL,
+                        event.rawX,
+                        event.rawY
+                    )
                 }
             }
             polygonView.invalidate()

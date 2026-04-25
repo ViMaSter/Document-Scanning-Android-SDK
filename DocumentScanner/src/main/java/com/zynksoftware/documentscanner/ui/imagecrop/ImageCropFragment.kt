@@ -32,6 +32,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.MotionEvent
 import android.widget.FrameLayout
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updateLayoutParams
@@ -50,6 +51,9 @@ internal class ImageCropFragment : BaseFragment() {
 
     companion object {
         private val TAG = ImageCropFragment::class.simpleName
+        private const val ZOOM_SCALE = 4f
+        private const val ZOOM_SECTION_RATIO = 0.2f
+        private const val ZOOM_MARGIN_RATIO = 0.025f
 
         fun newInstance(): ImageCropFragment {
             return ImageCropFragment()
@@ -59,6 +63,9 @@ internal class ImageCropFragment : BaseFragment() {
     private val nativeClass = OpenCvNativeBridge()
 
     private var selectedImage: Bitmap? = null
+    private var zoomSectionSizePx = 0
+    private var zoomMarginXPx = 0
+    private var zoomMarginYPx = 0
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -76,6 +83,10 @@ internal class ImageCropFragment : BaseFragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        binding.holderImageView.post {
+            initializeZoomPreviewSize()
+        }
 
         val sourceBitmap =
             BitmapFactory.decodeFile(getScanActivity().originalImageFile.absolutePath)
@@ -103,6 +114,121 @@ internal class ImageCropFragment : BaseFragment() {
         binding.confirmButton.setOnClickListener {
             onConfirmButtonClicked()
         }
+        binding.polygonView.onCornerTouchEvent = { action, rawX, rawY ->
+            onPolygonCornerTouch(action, rawX, rawY)
+        }
+    }
+
+    private fun initializeZoomPreviewSize() {
+        val containerWidth = binding.holderImageView.width
+        val containerHeight = binding.holderImageView.height
+        if (containerWidth <= 0 || containerHeight <= 0) {
+            return
+        }
+
+        zoomSectionSizePx = (minOf(containerWidth, containerHeight) * ZOOM_SECTION_RATIO).toInt()
+            .coerceAtLeast(1)
+        zoomMarginXPx = (containerWidth * ZOOM_MARGIN_RATIO).toInt()
+        zoomMarginYPx = (containerHeight * ZOOM_MARGIN_RATIO).toInt()
+
+        binding.zoomPreviewContainer.layoutParams = FrameLayout.LayoutParams(
+            zoomSectionSizePx,
+            zoomSectionSizePx
+        )
+        binding.zoomPreviewContainer.translationX = zoomMarginXPx.toFloat()
+        binding.zoomPreviewContainer.translationY = zoomMarginYPx.toFloat()
+    }
+
+    private fun onPolygonCornerTouch(action: Int, rawX: Float, rawY: Float) {
+        when (action) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                if (zoomSectionSizePx == 0) {
+                    initializeZoomPreviewSize()
+                }
+                updateZoomPreviewPosition(rawX, rawY)
+                updateZoomPreviewImage(rawX, rawY)
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                hideZoomPreview()
+            }
+        }
+    }
+
+    private fun updateZoomPreviewPosition(rawX: Float, rawY: Float) {
+        val hostLocation = IntArray(2)
+        binding.holderImageView.getLocationOnScreen(hostLocation)
+
+        val localTouchX = rawX - hostLocation[0]
+        val localTouchY = rawY - hostLocation[1]
+        val centerX = binding.holderImageView.width / 2f
+        val centerY = binding.holderImageView.height / 2f
+
+        val userInLeftHalf = localTouchX < centerX
+        val userInTopHalf = localTouchY < centerY
+
+        val previewX = if (userInLeftHalf) {
+            (binding.holderImageView.width - zoomSectionSizePx - zoomMarginXPx).toFloat()
+        } else {
+            zoomMarginXPx.toFloat()
+        }
+
+        val previewY = if (userInTopHalf) {
+            (binding.holderImageView.height - zoomSectionSizePx - zoomMarginYPx).toFloat()
+        } else {
+            zoomMarginYPx.toFloat()
+        }
+
+        binding.zoomPreviewContainer.translationX = previewX
+        binding.zoomPreviewContainer.translationY = previewY
+    }
+
+    private fun updateZoomPreviewImage(rawX: Float, rawY: Float) {
+        val drawable = binding.imagePreview.drawable as? BitmapDrawable ?: return
+        val imageBitmap = drawable.bitmap ?: return
+        if (binding.imagePreview.width <= 0 || binding.imagePreview.height <= 0) {
+            return
+        }
+
+        val imageLocation = IntArray(2)
+        binding.imagePreview.getLocationOnScreen(imageLocation)
+        val imageLeft = imageLocation[0].toFloat()
+        val imageTop = imageLocation[1].toFloat()
+        val imageRight = imageLeft + binding.imagePreview.width
+        val imageBottom = imageTop + binding.imagePreview.height
+
+        if (rawX < imageLeft || rawX > imageRight || rawY < imageTop || rawY > imageBottom) {
+            hideZoomPreview()
+            return
+        }
+
+        val normalizedX = ((rawX - imageLeft) / binding.imagePreview.width).coerceIn(0f, 1f)
+        val normalizedY = ((rawY - imageTop) / binding.imagePreview.height).coerceIn(0f, 1f)
+        val sourceX = (normalizedX * imageBitmap.width).toInt().coerceIn(0, imageBitmap.width - 1)
+        val sourceY =
+            (normalizedY * imageBitmap.height).toInt().coerceIn(0, imageBitmap.height - 1)
+
+        val sampleSize = (zoomSectionSizePx / ZOOM_SCALE).toInt().coerceAtLeast(1)
+        val cropWidth = minOf(sampleSize, imageBitmap.width)
+        val cropHeight = minOf(sampleSize, imageBitmap.height)
+
+        val cropLeft = (sourceX - cropWidth / 2).coerceIn(0, imageBitmap.width - cropWidth)
+        val cropTop = (sourceY - cropHeight / 2).coerceIn(0, imageBitmap.height - cropHeight)
+
+        val croppedBitmap = Bitmap.createBitmap(imageBitmap, cropLeft, cropTop, cropWidth, cropHeight)
+        val zoomedBitmap = Bitmap.createScaledBitmap(
+            croppedBitmap,
+            zoomSectionSizePx,
+            zoomSectionSizePx,
+            true
+        )
+
+        binding.zoomPreviewImage.setImageBitmap(zoomedBitmap)
+        binding.zoomPreviewContainer.visibility = View.VISIBLE
+    }
+
+    private fun hideZoomPreview() {
+        binding.zoomPreviewContainer.visibility = View.GONE
     }
 
     private fun getScanActivity(): InternalScanActivity {
