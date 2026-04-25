@@ -26,6 +26,7 @@ import android.view.MotionEvent
 import androidx.appcompat.widget.AppCompatImageView
 import androidx.core.content.ContextCompat
 import com.zynksoftware.documentscanner.R
+import java.util.ArrayDeque
 
 internal class PolygonPointImageView @JvmOverloads constructor(
     context: Context,
@@ -34,8 +35,15 @@ internal class PolygonPointImageView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : AppCompatImageView(context, attrs, defStyleAttr) {
 
+    companion object {
+        private const val POSITION_HISTORY_WINDOW_MS = 300L
+    }
+
+    private data class TimedPosition(val timestampMs: Long, val point: PointF)
+
     private var downPoint = PointF()
-    private var startPoint = PointF()
+    private var parentTopLeft = PointF()
+    private val positionHistory = ArrayDeque<TimedPosition>()
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         super.onTouchEvent(event)
@@ -43,53 +51,66 @@ internal class PolygonPointImageView @JvmOverloads constructor(
         if (polygonView != null) {
             when (event.action) {
                 MotionEvent.ACTION_MOVE -> {
-                    val mv = PointF(event.x - downPoint.x, event.y - downPoint.y)
-                    if (startPoint.x + mv.x + width < polygonView.width &&
-                        startPoint.y + mv.y + height < polygonView.height &&
-                        startPoint.x + mv.x > 0 && startPoint.y + mv.y > 0
-                    ) {
-                        x = startPoint.x + mv.x
-                        y = startPoint.y + mv.y
-                        startPoint = PointF(x, y)
-                    }
-                    polygonView.dispatchCornerTouchEvent(
-                        MotionEvent.ACTION_MOVE,
-                        event.rawX,
-                        event.rawY
-                    )
+                    val nextX = (event.rawX - parentTopLeft.x - downPoint.x)
+                        .coerceIn(0f, (polygonView.width - width).toFloat())
+                    val nextY = (event.rawY - parentTopLeft.y - downPoint.y)
+                        .coerceIn(0f, (polygonView.height - height).toFloat())
+
+                    x = nextX
+                    y = nextY
+                    recordPosition(event.eventTime)
+                    dispatchCornerTouchEvent(MotionEvent.ACTION_MOVE)
                 }
 
                 MotionEvent.ACTION_DOWN -> {
                     downPoint.x = event.x
                     downPoint.y = event.y
-                    startPoint = PointF(x, y)
-                    polygonView.dispatchCornerTouchEvent(
-                        MotionEvent.ACTION_DOWN,
-                        event.rawX,
-                        event.rawY
-                    )
+                    val parentLocation = IntArray(2)
+                    polygonView.getLocationOnScreen(parentLocation)
+                    parentTopLeft = PointF(parentLocation[0].toFloat(), parentLocation[1].toFloat())
+                    positionHistory.clear()
+                    recordPosition(event.eventTime)
+                    dispatchCornerTouchEvent(MotionEvent.ACTION_DOWN)
                 }
 
                 MotionEvent.ACTION_UP -> {
+                    snapToOldestRecordedPosition()
                     performClick()
-                    polygonView.dispatchCornerTouchEvent(
-                        MotionEvent.ACTION_UP,
-                        event.rawX,
-                        event.rawY
-                    )
+                    dispatchCornerTouchEvent(MotionEvent.ACTION_UP)
+                    positionHistory.clear()
                 }
 
                 MotionEvent.ACTION_CANCEL -> {
-                    polygonView.dispatchCornerTouchEvent(
-                        MotionEvent.ACTION_CANCEL,
-                        event.rawX,
-                        event.rawY
-                    )
+                    dispatchCornerTouchEvent(MotionEvent.ACTION_CANCEL)
+                    positionHistory.clear()
                 }
             }
             polygonView.invalidate()
         }
         return true
+    }
+
+    private fun dispatchCornerTouchEvent(action: Int) {
+        val polygon = polygonView ?: return
+        val location = IntArray(2)
+        getLocationOnScreen(location)
+        val centerRawX = location[0] + width / 2f
+        val centerRawY = location[1] + height / 2f
+        polygon.dispatchCornerTouchEvent(action, centerRawX, centerRawY)
+    }
+
+    private fun recordPosition(timestampMs: Long) {
+        val cutoff = timestampMs - POSITION_HISTORY_WINDOW_MS
+        while (positionHistory.isNotEmpty() && positionHistory.first.timestampMs < cutoff) {
+            positionHistory.removeFirst()
+        }
+        positionHistory.addLast(TimedPosition(timestampMs, PointF(x, y)))
+    }
+
+    private fun snapToOldestRecordedPosition() {
+        val oldestPosition = positionHistory.firstOrNull() ?: return
+        x = oldestPosition.point.x
+        y = oldestPosition.point.y
     }
 
     // Because we call this from onTouchEvent, this code will be executed for both
