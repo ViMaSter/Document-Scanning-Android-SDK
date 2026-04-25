@@ -23,6 +23,7 @@ import android.content.Context
 import android.graphics.PointF
 import android.util.AttributeSet
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import androidx.appcompat.widget.AppCompatImageView
 import androidx.core.content.ContextCompat
 import com.zynksoftware.documentscanner.R
@@ -35,9 +36,15 @@ internal class PolygonPointImageView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : AppCompatImageView(context, attrs, defStyleAttr) {
 
-    companion object {
-        private const val POSITION_HISTORY_WINDOW_MS = 300L
-    }
+    // How far back in time to retain positions for slop analysis.
+    // ViewConfiguration.getTapTimeout() is the system-defined duration after which a press is no
+    // longer considered a tap (~100 ms), which matches our "recent jitter window" intent exactly.
+    private val positionHistoryWindowMs: Long = ViewConfiguration.getTapTimeout().toLong()
+
+    // Pixel distance below which movement is considered a micro-jitter.
+    // scaledTouchSlop is the system value for the minimum distance a touch must travel to be
+    // treated as a scroll/drag, already scaled for the device's screen density.
+    private val touchSlopPx: Float = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
 
     private data class TimedPosition(val timestampMs: Long, val point: PointF)
 
@@ -74,7 +81,7 @@ internal class PolygonPointImageView @JvmOverloads constructor(
                 }
 
                 MotionEvent.ACTION_UP -> {
-                    snapToOldestRecordedPosition()
+                    snapToStablePosition()
                     performClick()
                     dispatchCornerTouchEvent(MotionEvent.ACTION_UP)
                     positionHistory.clear()
@@ -100,17 +107,43 @@ internal class PolygonPointImageView @JvmOverloads constructor(
     }
 
     private fun recordPosition(timestampMs: Long) {
-        val cutoff = timestampMs - POSITION_HISTORY_WINDOW_MS
+        val cutoff = timestampMs - positionHistoryWindowMs
         while (positionHistory.isNotEmpty() && positionHistory.first.timestampMs < cutoff) {
             positionHistory.removeFirst()
         }
         positionHistory.addLast(TimedPosition(timestampMs, PointF(x, y)))
     }
 
-    private fun snapToOldestRecordedPosition() {
-        val oldestPosition = positionHistory.firstOrNull() ?: return
-        x = oldestPosition.point.x
-        y = oldestPosition.point.y
+    /**
+     * Walk backwards through recent history. As long as each step is smaller than
+     * TOUCH_SLOP_PX we treat those samples as jitter and keep going further back.
+     * The first sample we find whose movement *into* it was larger than the slop is
+     * the last "intentional" position, and we snap to it.
+     * If all recorded movement is below slop (the finger barely moved), we keep the
+     * current position unchanged.
+     */
+    private fun snapToStablePosition() {
+        val history = positionHistory.toList()
+        if (history.size < 2) return
+
+        // Start from the newest sample and walk toward older ones.
+        var stableIndex = history.lastIndex
+        for (i in history.lastIndex downTo 1) {
+            val dx = history[i].point.x - history[i - 1].point.x
+            val dy = history[i].point.y - history[i - 1].point.y
+            val dist = Math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+            if (dist < touchSlopPx) {
+                // This step was jitter – look one frame further back.
+                stableIndex = i - 1
+            } else {
+                // Movement was intentional; stop here.
+                break
+            }
+        }
+
+        val stable = history[stableIndex]
+        x = stable.point.x
+        y = stable.point.y
     }
 
     // Because we call this from onTouchEvent, this code will be executed for both

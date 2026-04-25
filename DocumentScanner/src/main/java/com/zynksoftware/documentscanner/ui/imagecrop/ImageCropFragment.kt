@@ -52,8 +52,9 @@ internal class ImageCropFragment : BaseFragment() {
     companion object {
         private val TAG = ImageCropFragment::class.simpleName
         private const val ZOOM_SCALE = 4f
-        private const val ZOOM_SECTION_RATIO = 0.2f
+        private const val ZOOM_SECTION_RATIO = 0.3f
         private const val ZOOM_MARGIN_RATIO = 0.025f
+        private const val ZOOM_DEAD_ZONE_RATIO = 0.2f
 
         fun newInstance(): ImageCropFragment {
             return ImageCropFragment()
@@ -63,9 +64,12 @@ internal class ImageCropFragment : BaseFragment() {
     private val nativeClass = OpenCvNativeBridge()
 
     private var selectedImage: Bitmap? = null
-    private var zoomSectionSizePx = 0
+    private var zoomSectionWidthPx = 0
+    private var zoomSectionHeightPx = 0
     private var zoomMarginXPx = 0
     private var zoomMarginYPx = 0
+    private var previewOnRightSide: Boolean? = null
+    private var previewOnBottomSide: Boolean? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -126,14 +130,16 @@ internal class ImageCropFragment : BaseFragment() {
             return
         }
 
-        zoomSectionSizePx = (minOf(containerWidth, containerHeight) * ZOOM_SECTION_RATIO).toInt()
-            .coerceAtLeast(1)
+        val largerDimensionPx = maxOf(containerWidth, containerHeight)
+        val zoomSectionSizePx = (largerDimensionPx * ZOOM_SECTION_RATIO).toInt().coerceAtLeast(1)
+        zoomSectionWidthPx = zoomSectionSizePx
+        zoomSectionHeightPx = zoomSectionSizePx
         zoomMarginXPx = (containerWidth * ZOOM_MARGIN_RATIO).toInt()
         zoomMarginYPx = (containerHeight * ZOOM_MARGIN_RATIO).toInt()
 
         binding.zoomPreviewContainer.layoutParams = FrameLayout.LayoutParams(
-            zoomSectionSizePx,
-            zoomSectionSizePx
+            zoomSectionWidthPx,
+            zoomSectionHeightPx
         )
         binding.zoomPreviewContainer.translationX = zoomMarginXPx.toFloat()
         binding.zoomPreviewContainer.translationY = zoomMarginYPx.toFloat()
@@ -142,7 +148,7 @@ internal class ImageCropFragment : BaseFragment() {
     private fun onPolygonCornerTouch(action: Int, rawX: Float, rawY: Float) {
         when (action) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                if (zoomSectionSizePx == 0) {
+                if (zoomSectionWidthPx == 0 || zoomSectionHeightPx == 0) {
                     initializeZoomPreviewSize()
                 }
                 updateZoomPreviewPosition(rawX, rawY)
@@ -161,20 +167,38 @@ internal class ImageCropFragment : BaseFragment() {
 
         val localTouchX = rawX - hostLocation[0]
         val localTouchY = rawY - hostLocation[1]
-        val centerX = binding.holderImageView.width / 2f
-        val centerY = binding.holderImageView.height / 2f
+        val width = binding.holderImageView.width.toFloat()
+        val height = binding.holderImageView.height.toFloat()
+        val switchStartRatio = (1f - ZOOM_DEAD_ZONE_RATIO) / 2f
+        val leftSwitchX = width * switchStartRatio
+        val rightSwitchX = width * (1f - switchStartRatio)
+        val topSwitchY = height * switchStartRatio
+        val bottomSwitchY = height * (1f - switchStartRatio)
 
-        val userInLeftHalf = localTouchX < centerX
-        val userInTopHalf = localTouchY < centerY
+        if (localTouchX <= leftSwitchX) {
+            previewOnRightSide = true
+        } else if (localTouchX >= rightSwitchX) {
+            previewOnRightSide = false
+        } else if (previewOnRightSide == null) {
+            previewOnRightSide = localTouchX < width / 2f
+        }
 
-        val previewX = if (userInLeftHalf) {
-            (binding.holderImageView.width - zoomSectionSizePx - zoomMarginXPx).toFloat()
+        if (localTouchY <= topSwitchY) {
+            previewOnBottomSide = true
+        } else if (localTouchY >= bottomSwitchY) {
+            previewOnBottomSide = false
+        } else if (previewOnBottomSide == null) {
+            previewOnBottomSide = localTouchY < height / 2f
+        }
+
+        val previewX = if (previewOnRightSide == true) {
+            (binding.holderImageView.width - zoomSectionWidthPx - zoomMarginXPx).toFloat()
         } else {
             zoomMarginXPx.toFloat()
         }
 
-        val previewY = if (userInTopHalf) {
-            (binding.holderImageView.height - zoomSectionSizePx - zoomMarginYPx).toFloat()
+        val previewY = if (previewOnBottomSide == true) {
+            (binding.holderImageView.height - zoomSectionHeightPx - zoomMarginYPx).toFloat()
         } else {
             zoomMarginYPx.toFloat()
         }
@@ -208,9 +232,10 @@ internal class ImageCropFragment : BaseFragment() {
         val sourceY =
             (normalizedY * imageBitmap.height).toInt().coerceIn(0, imageBitmap.height - 1)
 
-        val sampleSize = (zoomSectionSizePx / ZOOM_SCALE).toInt().coerceAtLeast(1)
-        val cropWidth = minOf(sampleSize, imageBitmap.width)
-        val cropHeight = minOf(sampleSize, imageBitmap.height)
+        val sampleWidth = (zoomSectionWidthPx / ZOOM_SCALE).toInt().coerceAtLeast(1)
+        val sampleHeight = (zoomSectionHeightPx / ZOOM_SCALE).toInt().coerceAtLeast(1)
+        val cropWidth = minOf(sampleWidth, imageBitmap.width)
+        val cropHeight = minOf(sampleHeight, imageBitmap.height)
 
         val cropLeft = (sourceX - cropWidth / 2).coerceIn(0, imageBitmap.width - cropWidth)
         val cropTop = (sourceY - cropHeight / 2).coerceIn(0, imageBitmap.height - cropHeight)
@@ -218,8 +243,8 @@ internal class ImageCropFragment : BaseFragment() {
         val croppedBitmap = Bitmap.createBitmap(imageBitmap, cropLeft, cropTop, cropWidth, cropHeight)
         val zoomedBitmap = Bitmap.createScaledBitmap(
             croppedBitmap,
-            zoomSectionSizePx,
-            zoomSectionSizePx,
+            zoomSectionWidthPx,
+            zoomSectionHeightPx,
             true
         )
 
@@ -229,6 +254,8 @@ internal class ImageCropFragment : BaseFragment() {
 
     private fun hideZoomPreview() {
         binding.zoomPreviewContainer.visibility = View.GONE
+        previewOnRightSide = null
+        previewOnBottomSide = null
     }
 
     private fun getScanActivity(): InternalScanActivity {
